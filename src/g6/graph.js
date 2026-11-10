@@ -44,6 +44,24 @@ import { EVENT_ALIASES, TOPOLOGY_EVENTS } from '../sdk/events.js'
  */
 const COMBO_FIT_MARGIN = 4
 
+/**
+ * 分层 zIndex 的步长与段内偏移。
+ *
+ * 每层独占一个 `Z_LAYER_STEP` 宽的 z 区间：
+ *
+ * ```
+ * 较近层 combo → +Z_EDGE_OFFSET 较近层边 → +Z_NODE_OFFSET 较近层节点
+ *   → +Z_LAYER_STEP 较远层 combo → ...
+ * ```
+ *
+ * 跨层连线取「较近层 combo + Z_EDGE_OFFSET」，于是自然落在
+ * 较近层面板之上、较远层面板之下，同时仍在两端节点之下。
+ */
+const Z_LAYER_STEP = 100
+const Z_LAYER_BASE = 100
+const Z_EDGE_OFFSET = 40
+const Z_NODE_OFFSET = 60
+
 const DEFAULT_BEHAVIORS = [
   'drag-canvas',
   'zoom-canvas',
@@ -625,6 +643,8 @@ export class G6TopologyGraph {
         await this._freezeLayerSlopes()
         if (this.autoFit) await this.graph.fitView(undefined, { duration: 180 })
         this.applyStates()
+        // 层级必须在节点 / 层完全稳定后再定，跨层连线才能正确夹在两层之间
+        await this._applyStackZOrder()
         // 等最终一帧画完再解除隐藏，保证显示出来就是稳定状态
         await this._waitFrames(1)
       })
@@ -696,6 +716,8 @@ export class G6TopologyGraph {
     }
 
     this.applyStates()
+    // 增量更新也可能新增 / 删除节点与连线，层级需要重新对齐
+    await this._applyStackZOrder()
     this._emitCustom(TOPOLOGY_EVENTS.DATA_UPDATE, {
       nodes: this.data.nodes.length,
       edges: this.data.edges.length,
@@ -736,6 +758,7 @@ export class G6TopologyGraph {
       await this._freezeLayerSlopes()
       if (this.autoFit) await this.graph.fitView(undefined, { duration: 260 })
       this.applyStates()
+      await this._applyStackZOrder()
     })
     this._emitCustom(TOPOLOGY_EVENTS.LAYOUT_CHANGE, {
       layout: this.layoutId,
@@ -770,6 +793,7 @@ export class G6TopologyGraph {
       await this._freezeLayerSlopes()
       if (this.autoFit) await this.graph.fitView(undefined, { duration: 240 })
       this.applyStates()
+      await this._applyStackZOrder()
     })
     this._emitCustom(TOPOLOGY_EVENTS.LAYOUT_CHANGE, {
       layout: this.layoutId,
@@ -793,6 +817,7 @@ export class G6TopologyGraph {
       await this._freezeLayerSlopes()
       if (this.autoFit) await this.graph.fitView(undefined, { duration: 260 })
       this.applyStates()
+      await this._applyStackZOrder()
     })
     this._emitCustom(TOPOLOGY_EVENTS.LAYOUT_CHANGE, {
       layout: this.layoutId,
@@ -1217,6 +1242,116 @@ export class G6TopologyGraph {
     await this._drawCombos()
   }
 
+  /* ------------------------------ 元素层级 ------------------------------ */
+
+  /**
+   * 应用分层 zIndex：让跨层连线「源层在下、目标层在上」。
+   *
+   * 2.5D 视图里每层都是一块半透明面板，连线压在面板上会被填充色染色。
+   * 正确的纵深关系是：
+   *
+   * - 连线从较远（上方）的层出发 → 该段应被源层面板压住，看起来是「钻进面板里」；
+   * - 连线落到较近（下方）的层 → 该段应浮在目标层面板之上，保持清晰。
+   *
+   * G6 每个元素只有一个 zIndex，所以这里让层按视觉深度**倒序**分配
+   * （越靠上 = 越远 = zIndex 越高），跨层边再取「较近层 combo + 偏移」：
+   *
+   * ```
+   * 较近层 combo  <  跨层边  <  较远层 combo  <  较远层边  <  较远层节点
+   * ```
+   *
+   * 层与层在平面上并不重叠，倒序分配不会改变任何面板的可见遮挡，
+   * 只影响面板与连线之间的前后关系。同层内的边、节点分别取 combo 的固定偏移，
+   * 保证节点永远在边之上。
+   */
+  async _applyStackZOrder() {
+    if (!this.graph || this.destroying || !this._isComboMode()) return
+    const data = this.graph.getData()
+    const layers = (data.combos || []).filter((combo) => combo.data?.kind === 'layer')
+    if (!layers.length) return
+
+    // 1. 按视觉位置确定深度：越靠上 = 越远 = zIndex 越高
+    const ordered = layers
+      .map((combo, index) => {
+        const rect = this._comboRectOf(combo.id)
+        return {
+          id: String(combo.id),
+          top: Number.isFinite(rect?.top) ? rect.top : null,
+          order: Number(combo.data?.order ?? index),
+        }
+      })
+      .sort((a, b) => {
+        if (a.top != null && b.top != null && Math.abs(a.top - b.top) > 0.5) {
+          return a.top - b.top
+        }
+        return a.order - b.order
+      })
+
+    const depthIndex = new Map()
+    const depthZ = []
+    ordered.forEach((item, index) => {
+      depthIndex.set(item.id, index)
+      depthZ.push(Z_LAYER_BASE + (ordered.length - index) * Z_LAYER_STEP)
+    })
+
+    const zIndexes = {}
+    ordered.forEach((item, index) => {
+      zIndexes[item.id] = depthZ[index]
+    })
+
+    // 2. 节点：始终浮在自己所属层的面板之上
+    const layerOfNode = new Map()
+    for (const node of data.nodes || []) {
+      const nodeId = String(node.id)
+      const layerId = String(node.combo || node.data?.combo || '')
+      if (!layerId) continue
+      layerOfNode.set(nodeId, layerId)
+      const index = depthIndex.get(layerId)
+      if (index == null) continue
+      zIndexes[nodeId] = depthZ[index] + Z_NODE_OFFSET
+    }
+
+    // 3. 连线：同层边浮在本层面板上；跨层边取「较近层」的区间
+    for (const edge of data.edges || []) {
+      const sourceIndex = depthIndex.get(layerOfNode.get(String(edge.source)))
+      const targetIndex = depthIndex.get(layerOfNode.get(String(edge.target)))
+      if (sourceIndex == null && targetIndex == null) continue
+      const near = Math.max(sourceIndex ?? -1, targetIndex ?? -1)
+      if (near < 0) continue
+      zIndexes[String(edge.id)] = depthZ[near] + Z_EDGE_OFFSET
+    }
+
+    // 4. 只提交真正变化的层级，避免稳定态下反复重绘
+    const changes = {}
+    let count = 0
+    const elementRegistry = this.graph.context?.element
+    for (const [id, value] of Object.entries(zIndexes)) {
+      // 刚被删除的元素不再提交，否则 setElementZIndex 会抛错
+      if (
+        typeof elementRegistry?.getElement === 'function' &&
+        !elementRegistry.getElement(id)
+      ) {
+        continue
+      }
+      let current = null
+      try {
+        current = this.graph.getElementZIndex(id)
+      } catch {
+        current = null
+      }
+      if (current === value) continue
+      changes[id] = value
+      count += 1
+    }
+    if (!count) return
+
+    try {
+      await this.graph.setElementZIndex(changes)
+    } catch {
+      // 元素可能刚好被删除，忽略这一次层级刷新
+    }
+  }
+
   /**
    * 使用 G6 的真实包围盒做最终碰撞修正。
    *
@@ -1381,6 +1516,8 @@ export class G6TopologyGraph {
       this._resolveStartedAt = 0
       this._releaseDragAnimation()
     }
+    // 层被推开后上下顺序可能变化，按最终位置重新分配层级
+    this._applyStackZOrder().catch(() => {})
   }
 
   /**
@@ -2270,6 +2407,10 @@ export class G6TopologyGraph {
 
     // 层会随子节点变大，松手后统一修正 Combo 之间的重叠
     this._scheduleDragOverlapResolve()
+
+    // drag-element 在 dragstart 时调用了 frontElement()，会把被拖元素永久提到最前，
+    // 松手后立刻恢复「层 → 边 → 节点」的分层层级，避免连线骑到面板上。
+    this._applyStackZOrder().catch(() => {})
 
     this._resumeMinimap()
 
