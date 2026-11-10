@@ -748,6 +748,11 @@ await view.g6?.relayout()
 - 首次布局 / `relayout()` / 布局参数变化后，会把各层左右斜率冻结到 `_layerSlopes`；
   拖拽节点或层时按冻结斜率绘制，层高变化不会改变底边左右内角与侧边角度；
 - 缩放比例写入 Combo 的 `data.scale` 与节点的 `data.__comboScale`，主题层直接读取；
+- 层 / 连线 / 节点显式分配 `zIndex`，形成「源层在下、目标层在上」的连线遮挡：
+  - 层按视觉上下位置倒序分配（越靠上越远、zIndex 越高）；
+  - 同层连线 = 本层 combo + 40，节点 = 本层 combo + 60；
+  - 跨层连线 = 较近层 combo + 40，因此位于较近层面板之上、较远层面板之下；
+  - `mount` / `setData` / `setLayout` / `setLayoutOptions` / `relayout` 以及拖拽修正结束后都会重新对齐一次；
 - 因为完全在二维平面内完成，G6 的命中检测、拖拽、缩放、导出都不受影响；
 - 其他布局即使生成 Combo 也会强制 `perspective: false`，不会被误缩放。
 
