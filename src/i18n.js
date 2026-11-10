@@ -94,6 +94,8 @@ const messages = {
     'rail.depth25d': '2.5D 视图',
     'rail.depth25dOn': '已开启 2.5D 透视',
     'rail.depth25dOff': '已关闭 2.5D 透视',
+    'rail.trapezoidAngle': '侧边角度',
+    'rail.trapezoidAngleHint': '梯形侧边相对竖直方向的倾角，左右两侧对称；0° 为矩形',
 
     'status.all': '全部',
     'status.ok': '正常',
@@ -317,6 +319,8 @@ const messages = {
     'rail.depth25d': '2.5D view',
     'rail.depth25dOn': '2.5D perspective enabled',
     'rail.depth25dOff': '2.5D perspective disabled',
+    'rail.trapezoidAngle': 'Side angle',
+    'rail.trapezoidAngleHint': 'Trapezoid side angle from vertical; both sides are symmetric, 0° is a rectangle',
 
     'status.all': 'All',
     'status.ok': 'Healthy',

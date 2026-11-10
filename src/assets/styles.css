@@ -561,6 +561,56 @@ button {
   box-shadow: inset 0 0 14px rgba(53, 208, 255, 0.14), 0 0 12px rgba(53, 208, 255, 0.12);
 }
 
+/* 梯形侧边角度选择：紧凑地放在 2.5D 开关下方 */
+.rail-field {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 9px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.rail-field-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-field select {
+  flex: 0 0 auto;
+  width: 62px;
+  height: 26px;
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--text);
+  cursor: pointer;
+  background: rgba(53, 208, 255, 0.08);
+  border: 1px solid rgba(53, 208, 255, 0.22);
+  border-radius: 7px;
+  outline: none;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.rail-field select:hover,
+.rail-field select:focus {
+  background: rgba(53, 208, 255, 0.14);
+  border-color: rgba(53, 208, 255, 0.46);
+}
+
+[data-theme='light'] .rail-field select {
+  background: rgba(10, 143, 196, 0.08);
+  border-color: rgba(10, 143, 196, 0.24);
+}
+
+[data-theme='light'] .rail-field select:hover,
+[data-theme='light'] .rail-field select:focus {
+  background: rgba(10, 143, 196, 0.14);
+  border-color: rgba(10, 143, 196, 0.46);
+}
+
 .rail-foot {
   display: flex;
   align-items: center;

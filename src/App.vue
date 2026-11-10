@@ -95,6 +95,19 @@
             <Icon name="grid3d" :size="16" />
             <span v-if="!workspace.collapsed" class="rail-label">{{ t('rail.depth25d') }}</span>
           </button>
+
+          <label
+            v-if="renderer === 'g6' && g6LayoutActive === 'g6-combo-layer' && depth25d && !workspace.collapsed"
+            class="rail-field"
+            :title="t('rail.trapezoidAngleHint')"
+          >
+            <span class="rail-field-label">{{ t('rail.trapezoidAngle') }}</span>
+            <select v-model.number="trapezoidAngle" @change="persistTrapezoidAngle">
+              <option v-for="angle in trapezoidAngleOptions" :key="angle" :value="angle">
+                {{ angle }}°
+              </option>
+            </select>
+          </label>
         </div>
 
         <div v-if="!workspace.collapsed" class="rail-foot">
@@ -253,6 +266,7 @@ import { SCENES, getSceneMeta } from './mock/data.js'
 import { STATUS_ORDER, statusMeta, typeLabel } from './topology/palette.js'
 import { getLayouts, subscribeLayouts } from './topology/layouts/index.js'
 import { G6_LAYOUTS, G6_DEFAULT_LAYOUT } from './g6/layouts.js'
+import { COMBO_LAYER_DEFAULTS } from './g6/comboConfig.js'
 import { WorkspaceLayout, WORKSPACE_RAIL_STORAGE_KEY } from './layout/workspaceLayout.js'
 import { aggregateTopology, extractSubgraph } from './topology/transform.js'
 import {
@@ -270,6 +284,7 @@ const THEME_KEY = 'topology-theme'
 const RENDERER_KEY = 'topology-renderer'
 const ONBOARD_KEY = 'topology-onboarded'
 const DEPTH_25D_KEY = 'topology-combo-depth-25d'
+const TRAPEZOID_ANGLE_KEY = 'topology-combo-trapezoid-angle'
 
 function resolveInitialTheme() {
   const saved = localStorage.getItem(THEME_KEY)
@@ -279,6 +294,15 @@ function resolveInitialTheme() {
 
 function resolveInitialRenderer() {
   return localStorage.getItem(RENDERER_KEY) === 'g6' ? 'g6' : 'three'
+}
+
+function resolveInitialTrapezoidAngle() {
+  const saved = localStorage.getItem(TRAPEZOID_ANGLE_KEY)
+  if (saved != null) {
+    const value = Number(saved)
+    if (Number.isFinite(value) && value >= 0 && value <= 45) return value
+  }
+  return COMBO_LAYER_DEFAULTS.trapezoidAngle
 }
 
 const initialState = loadInitialState({})
@@ -322,6 +346,9 @@ const minimap = ref(initialState.minimap !== false)
 const watermark = ref(initialState.watermark === true)
 // 分层 Combo 的 2.5D 透视开关：默认开启，用户手动关闭后记住选择
 const depth25d = ref(localStorage.getItem(DEPTH_25D_KEY) !== '0')
+// 梯形侧边倾角（相对竖直方向），左右对称；用户选择后记住
+const trapezoidAngle = ref(resolveInitialTrapezoidAngle())
+const trapezoidAngleOptions = [0, 10, 15, 20, 25, 30]
 const activeStatuses = ref(
   Array.isArray(initialState.activeStatuses) && initialState.activeStatuses.length
     ? initialState.activeStatuses
@@ -437,7 +464,10 @@ const g6Plugins = computed(() => ({
 }))
 // 只有分层 Combo 会消费 perspective；其它布局收到该参数也会忽略。
 // 这里只依赖 depth25d，避免切换布局时额外触发一次整图重渲染。
-const g6LayoutOptions = computed(() => ({ perspective: depth25d.value }))
+const g6LayoutOptions = computed(() => ({
+  perspective: depth25d.value,
+  trapezoidAngle: trapezoidAngle.value,
+}))
 
 const searchItems = computed(() => {
   if (!displayPayload.value) return []
@@ -876,6 +906,11 @@ function toggleDepth25d() {
   depth25d.value = !depth25d.value
   localStorage.setItem(DEPTH_25D_KEY, depth25d.value ? '1' : '0')
   showToast(depth25d.value ? t('rail.depth25dOn') : t('rail.depth25dOff'))
+}
+
+/** 记住用户选择的梯形侧边倾角 */
+function persistTrapezoidAngle() {
+  localStorage.setItem(TRAPEZOID_ANGLE_KEY, String(trapezoidAngle.value))
 }
 
 function applyTheme(mode) {

@@ -27,8 +27,11 @@ export const TRAPEZOID_COMBO_TYPE = 'combo-trapezoid'
  * - depthShiftY   每一级深度向上偏移的像素，形成抬升感
  * - topInsetSlope 梯形侧边斜率（每 1px 高度向内收窄的像素数）。
  *                 仅在未计算出灭点时兜底；正常 2.5D 视图会按灭点计算收窄量。
+ * - trapezoidAngle 梯形侧边相对竖直方向的倾角（度），左右两侧完全对称。
+ *                 0° 为矩形，数值越大斜边越斜；设置后所有层共用同一角度，
+ *                 侧边彼此平行，不再依赖灭点。传 `null` 可回退为统一灭点模式。
  * - vanishingDistance 灭点距离系数：灭点在整体上方「总高度 × 系数」处，
- *                 所有梯形侧边的延长线都汇聚到同一个灭点。
+ *                 仅在未设置 trapezoidAngle 时生效。
  * - trapezoidNodes 是否让节点阵列也按梯形分布（越靠上的行横向越窄）
  * - trapezoidMinScale 梯形压缩的保底比例，仅在灭点非常近时避免无限拉大间距
  * - layerTopInset 层面板顶边收窄比例（0 ~ 0.5），旧参数，仅在未设置 topInsetSlope 时兜底
@@ -54,8 +57,11 @@ export const COMBO_LAYER_DEFAULTS = Object.freeze({
   depthShiftY: 34,
   // 所有层统一使用该斜率，梯形侧边互相平行
   topInsetSlope: 0.12,
+  // 自定义梯形倾角（侧边相对竖直方向，单位度）：
+  // 左右两侧对称、所有层共用同一角度，层高变化时只改变底边长度，内角恒定
+  trapezoidAngle: 15,
   // 2.5D 灭点距离：灭点位于整体上方，距离 = 总高度 × vanishingDistance；
-  // 所有梯形的侧边延长线都会汇聚到该点
+  // 仅在 trapezoidAngle 为 null 时作为侧边收窄的兜底
   vanishingDistance: 0.6,
   // 节点阵列也按一点透视分布：上窄下宽，与层面板同向收拢
   trapezoidNodes: true,

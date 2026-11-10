@@ -308,11 +308,17 @@ export function buildComboOptions(theme, { showLabels = true, layoutOptions = {}
           ? layoutOptions.perspectiveOrigin
           : undefined
       // 布局稳定后冻结的每层左右斜率：拖动时优先使用，
-      // 保证梯形左下 / 右下内角与透视角度不随拖动变化
-      const sideSlopes =
-        perspective && layoutOptions.layerSlopes
-          ? layoutOptions.layerSlopes[datum.id]
-          : undefined
+      // 保证梯形左下 / 右下内角与透视角度不随拖动变化。
+      // 布局阶段尚无冻结值时，用自定义倾角兜底，保证首帧就是对称梯形。
+      const rawAngleSlope = layoutOptions.trapezoidSlope
+      const angleSlope =
+        typeof rawAngleSlope === 'number' && Number.isFinite(rawAngleSlope)
+          ? rawAngleSlope
+          : null
+      const sideSlopes = perspective
+        ? layoutOptions.layerSlopes?.[datum.id] ??
+          (angleSlope == null ? undefined : [angleSlope, angleSlope])
+        : undefined
 
       return {
         radius: 20,

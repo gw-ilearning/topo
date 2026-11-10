@@ -580,8 +580,10 @@ await loadGraph(data, {
 - 每一层的 Combo 是一块可拖拽的浮起面板，层与层之间保持固定 `layerGap`；
 - **2.5D 梯形透视**：开启后每个层都绘制成「顶窄底宽」的梯形（自定义 `combo-trapezoid`），
   远层向右上方斜向错位、缩小，近层放大，形成一叠悬浮面板的纵深效果；
-- **统一灭点**：所有梯形的斜边延长线都汇聚到同一个灭点（整体水平中心上方，
-  距离由 `vanishingDistance` 控制），不会出现各层斜率不一致；
+- **对称侧边角度**：默认所有层共用 `trapezoidAngle`（侧边相对竖直方向的倾角），
+  左右两侧斜率相同，底边左下 / 右下内角一致；
+- **可选统一灭点**：显式传入 `trapezoidAngle: null` 时回退为一点透视，
+  所有斜边延长线汇聚到同一灭点（距离由 `vanishingDistance` 控制）；
 - **网络场景三层归并**：原始 7 个 `layer` 会归并为「核心层 / 汇聚层 / 接入层」，
   层内的 `group` 仅参与聚类排布；
 - **两级防重叠**：节点（含标签）与层面板在布局阶段与渲染后都会做碰撞检查，
@@ -657,7 +659,8 @@ await loadGraph(data, {
     nearScale: 1.08,   // 最近层（最下方）缩放
     depthShiftX: 118,  // 远层向右偏移
     depthShiftY: 34,   // 远层向上偏移
-    vanishingDistance: 0.6, // 灭点距离系数；所有梯形斜边汇聚到同一灭点
+    trapezoidAngle: 15, // 侧边相对竖直方向的倾角（度），左右对称
+    vanishingDistance: 0.6, // 仅 trapezoidAngle: null 时生效的灭点距离系数
     topInsetSlope: 0.12, // 无灭点时的梯形斜率兜底
     minLayerGap: 64,   // 层间最小间距
     minClusterGap: 44, // 聚类间最小间距
@@ -682,8 +685,9 @@ await loadGraph(data, {
 | `nearScale` | `1.08` | 最近层（索引 `n-1`，最下方）的缩放比例，范围 `0.6 ~ 1.6` |
 | `depthShiftX` | `118` | 远层向右偏移的像素数，形成斜向堆叠 |
 | `depthShiftY` | `34` | 远层向上偏移的像素数，形成抬升感 |
+| `trapezoidAngle` | `15` | 梯形侧边相对竖直方向的倾角（度），左右完全对称；`0` 为矩形，范围 `0 ~ 44.9`；传 `null` 回退为统一灭点模式 |
 | `topInsetSlope` | `0.12` | 无灭点时的梯形斜率兜底：每 1px 高度向内收窄的像素数 |
-| `vanishingDistance` | `0.6` | 灭点距离系数：灭点在整体上方「总高度 × 系数」处；越大透视越弱 |
+| `vanishingDistance` | `0.6` | 仅 `trapezoidAngle: null` 时生效的灭点距离系数：灭点在整体上方「总高度 × 系数」处；越大透视越弱 |
 | `layerTopInset` | `0.2` | 旧参数：层面板顶边收窄比例，仅在未设置 `topInsetSlope` 时兜底 |
 | `topInsetLimit` | `0.24` | 旧参数：顶边收窄上限（相对面板高度），避免收得太窄压到内容 |
 | `minLayerGap` | `64` | 层间最小间距，会叠加 `safetyGap` |
@@ -737,11 +741,12 @@ await view.g6?.relayout()
 - 缩放会同时作用于节点本体尺寸、标签字号与偏移、描边、阴影，以及层内节点 / 聚类间距，
   保证布局计算尺寸与最终渲染尺寸一致；
 - 远层通过 `depthShiftX` / `depthShiftY` 向右上方错位，形成一叠悬浮面板的纵深；
-- 层 Combo 使用自定义 `combo-trapezoid` 绘制顶窄底宽的梯形，
-  所有梯形的斜边延长线都汇聚到同一个灭点（整体水平中心上方，
-  距离由 `vanishingDistance` 控制）；
+- 层 Combo 使用自定义 `combo-trapezoid` 绘制顶窄底宽的梯形：
+  - 默认按 `trapezoidAngle` 绘制，左右两侧斜率相同、底边内角一致，所有层共用同一角度；
+  - 显式传入 `trapezoidAngle: null` 时回退为统一灭点模式，
+    所有斜边延长线汇聚到同一灭点（整体水平中心上方，距离由 `vanishingDistance` 控制）；
 - 首次布局 / `relayout()` / 布局参数变化后，会把各层左右斜率冻结到 `_layerSlopes`；
-  拖拽节点或层时按冻结斜率绘制，层高变化不会改变底边左右内角与透视角度；
+  拖拽节点或层时按冻结斜率绘制，层高变化不会改变底边左右内角与侧边角度；
 - 缩放比例写入 Combo 的 `data.scale` 与节点的 `data.__comboScale`，主题层直接读取；
 - 因为完全在二维平面内完成，G6 的命中检测、拖拽、缩放、导出都不受影响；
 - 其他布局即使生成 Combo 也会强制 `perspective: false`，不会被误缩放。
@@ -760,7 +765,7 @@ await view.setLayoutOptions({ perspective: true })
 > 后者在 Combo 模式不变时只重新执行布局，不会重新计算 `__comboScale` 与 Combo 样式。
 
 想调整透视强度时，可以改 `farScale` / `nearScale` / `depthShiftX` / `depthShiftY` /
-`vanishingDistance`：
+`trapezoidAngle`（侧边倾角）或 `vanishingDistance`（仅 `trapezoidAngle: null` 时生效）：
 
 ```js
 await loadGraph(data, {
@@ -772,7 +777,8 @@ await loadGraph(data, {
     nearScale: 1.12,     // 底部更近、更大
     depthShiftX: 140,    // 斜向堆叠更明显
     depthShiftY: 44,
-    vanishingDistance: 0.9, // 灭点更远，梯形更接近矩形
+    trapezoidAngle: 20,  // 侧边更斜，左右仍然对称
+    // vanishingDistance: 0.9, // 仅 trapezoidAngle: null 时生效
   },
 })
 ```

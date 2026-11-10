@@ -300,6 +300,8 @@ export class G6TopologyGraph {
         perspectiveOrigin: this._perspectiveOrigin || undefined,
         // 每层冻结的左右斜率：拖动时优先按它绘制，保证底边内角不变
         layerSlopes: this._layerSlopes || undefined,
+        // 自定义倾角兜底：布局阶段尚未冻结时也按同一角度绘制
+        trapezoidSlope: this._trapezoidSlope(),
       },
     })
   }
@@ -1082,6 +1084,41 @@ export class G6TopologyGraph {
     this._layerSlopes = null
   }
 
+  /**
+   * 把自定义梯形倾角换算成「收窄量 / 层高」斜率。
+   *
+   * `trapezoidAngle` 定义为侧边相对竖直方向的夹角（度）：
+   * - 0° 时斜率为 0，梯形退化为矩形；
+   * - 角度越大，侧边越斜；
+   * - 左右两侧共用同一个斜率，因此左下 / 右下内角完全一致。
+   *
+   * 显式传入 `null` 时返回 null，回退到统一灭点模式。
+   */
+  _trapezoidSlope() {
+    const options = this._layoutOptions()
+    if (options.perspective === false) return null
+    const raw = options.trapezoidAngle
+    if (raw === null || raw === false) return null
+    const angle = Number(raw ?? COMBO_LAYER_DEFAULTS.trapezoidAngle)
+    if (!Number.isFinite(angle)) return null
+    // 限制在 45° 以内，避免极端角度下顶边翻转
+    const clamped = Math.min(44.9, Math.max(0, angle))
+    return Math.tan((clamped * Math.PI) / 180)
+  }
+
+  /**
+   * 取某层当前应使用的左右斜率。
+   *
+   * 拖动 / 稳定后优先使用冻结斜率；布局阶段则直接用自定义倾角兜底，
+   * 保证布局、padding 拟合、拖拽三个阶段使用同一套角度。
+   */
+  _slopesForLayer(id) {
+    const frozen = this._layerSlopes?.[id]
+    if (Array.isArray(frozen) && frozen.length === 2) return frozen
+    const slope = this._trapezoidSlope()
+    return slope == null ? null : [slope, slope]
+  }
+
   /** 比较两组冻结斜率是否一致（用于避免无意义的重绘） */
   _slopesEqual(previous, next) {
     if (!previous || !next) return false
@@ -1106,8 +1143,10 @@ export class G6TopologyGraph {
    *
    * 梯形底边为完整宽度，顶边左右各收窄 `inset = slope × 高度`，
    * 因此「收窄量 / 高度」就是底边内角的正切值。
-   * 布局稳定时按统一灭点算出该值并冻结，之后拖动节点 / 层时保持不变，
-   * 无论层怎么平移、变宽、变高，左下 / 右下内角都不会变化。
+   *
+   * 默认使用自定义倾角：左右斜率相同，所有层角度一致。
+   * `trapezoidAngle` 为 `null` 时回退为统一灭点模式（左、右斜率可能不同）。
+   * 冻结后拖动节点 / 层时保持不变，无论层怎么平移、变宽、变高，内角都不会变化。
    *
    * @param {[number, number]} [origin] 当前灭点，默认取控制器缓存的灭点
    * @returns {boolean} 斜率是否发生变化（需要重新应用样式）
@@ -1120,28 +1159,39 @@ export class G6TopologyGraph {
       this._layerSlopes = null
       return true
     }
-    if (!Array.isArray(origin) || origin.length !== 2) return false
-    const originX = Number(origin[0])
-    const originY = Number(origin[1])
-    if (!Number.isFinite(originX) || !Number.isFinite(originY)) return false
 
     const next = {}
     let captured = 0
     const combos = (this.graph.getData().combos || []).filter(
       (combo) => combo.data?.kind === 'layer',
     )
-    for (const combo of combos) {
-      const rect = this._comboRectOf(combo.id)
-      if (!rect || !(rect.width > 0) || !(rect.height > 0)) continue
-      const distance = rect.bottom - originY
-      // 灭点必须在层底边上方，否则斜率无意义
-      if (!(distance > 1)) continue
-      next[combo.id] = [
-        (originX - rect.left) / distance,
-        (rect.right - originX) / distance,
-      ]
-      captured += 1
+    const angleSlope = this._trapezoidSlope()
+    if (angleSlope != null) {
+      // 自定义倾角：左右完全对称，不依赖灭点和层宽高
+      for (const combo of combos) {
+        next[combo.id] = [angleSlope, angleSlope]
+        captured += 1
+      }
+    } else {
+      // 兜底：按统一灭点计算左右斜率
+      if (!Array.isArray(origin) || origin.length !== 2) return false
+      const originX = Number(origin[0])
+      const originY = Number(origin[1])
+      if (!Number.isFinite(originX) || !Number.isFinite(originY)) return false
+      for (const combo of combos) {
+        const rect = this._comboRectOf(combo.id)
+        if (!rect || !(rect.width > 0) || !(rect.height > 0)) continue
+        const distance = rect.bottom - originY
+        // 灭点必须在层底边上方，否则斜率无意义
+        if (!(distance > 1)) continue
+        next[combo.id] = [
+          (originX - rect.left) / distance,
+          (rect.right - originX) / distance,
+        ]
+        captured += 1
+      }
     }
+
     if (!captured || this._slopesEqual(this._layerSlopes, next)) return false
     this._layerSlopes = next
     return true
@@ -2030,7 +2080,7 @@ export class G6TopologyGraph {
       rects: childRects,
       padding: baseLayerPad,
       origin,
-      slopes: this._layerSlopes?.[layerId] || null,
+      slopes: this._slopesForLayer(layerId),
     })
     const layerChanged = !paddingEquals(
       layerPad,
@@ -2184,7 +2234,7 @@ export class G6TopologyGraph {
         if (rect) rects.push(this._rectBox(rect))
       }
       if (!rects.length) continue
-      const slopes = this._layerSlopes?.[combo.id] || null
+      const slopes = this._slopesForLayer(combo.id)
       const pad = this._requiredSidePadding({
         rects,
         padding: baseLayerPad,
