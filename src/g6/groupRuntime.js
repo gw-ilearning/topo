@@ -380,6 +380,8 @@ export class GroupLayerRuntime {
     this.syncAllPanels({ draw: false })
     this.resolvePanels()
     this.applyZOrder().catch(() => {})
+    // 通知控制器归一化保存被拖节点位置（面板拖动不写，相对关系未变）
+    this.controller._onGroupDragEnd?.(drag)
   }
 
   /** 每帧最多拟合一次面板，避免 pointermove 高频重绘 */

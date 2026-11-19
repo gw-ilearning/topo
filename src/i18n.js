@@ -96,6 +96,9 @@ const messages = {
     'rail.depth25dOff': '已关闭 2.5D 透视',
     'rail.trapezoidAngle': '侧边角度',
     'rail.trapezoidAngleHint': '梯形侧边相对竖直方向的倾角，左右两侧对称；0° 为矩形',
+    'rail.expandPersist': '保持展开',
+    'rail.expandPersistOn': '已开启：刷新后保留右键展开的子拓扑',
+    'rail.expandPersistOff': '已关闭：刷新后回到折叠态',
 
     'status.all': '全部',
     'status.ok': '正常',
@@ -321,6 +324,9 @@ const messages = {
     'rail.depth25dOff': '2.5D perspective disabled',
     'rail.trapezoidAngle': 'Side angle',
     'rail.trapezoidAngleHint': 'Trapezoid side angle from vertical; both sides are symmetric, 0° is a rectangle',
+    'rail.expandPersist': 'Keep expanded',
+    'rail.expandPersistOn': 'On: expanded sub-topology is preserved after refresh',
+    'rail.expandPersistOff': 'Off: collapses back to folded state after refresh',
 
     'status.all': 'All',
     'status.ok': 'Healthy',

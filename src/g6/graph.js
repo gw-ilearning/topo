@@ -217,6 +217,20 @@ export class G6TopologyGraph {
     // 展开前记录的层面板几何：panelId -> { base, synced, dirty }
     // 折叠回原始成员时用它精确还原，避免 syncPanel 与布局阶段尺寸口径不同造成的轻微漂移
     this._panelSnapshots = new Map()
+    // —— 位置持久化（仅 Group 模式）——
+    // 普通节点：nodeId -> [nx, ny]，相对所属面板的归一化坐标，分辨率无关
+    this._groupPositions = new Map()
+    // 展开子节点：childId -> [dx, dy]，相对父节点中心、按面板尺寸归一化的偏移
+    this._childRel = new Map()
+    // 是否随刷新保持「展开子拓扑」状态；关闭时刷新回到折叠态。
+    // 从 localStorage 读初始值：首次 _ingest 在 ready 之前发生，必须此时就定，
+    // 否则即便开关开着，初始渲染也不会加载持久化的展开态。
+    this._expandPersist =
+      typeof localStorage !== 'undefined' &&
+      localStorage.getItem('topology-group-expand-persist') === '1'
+    // 当前位置存储的 scope（scene:layout），用于切换场景/布局时换装
+    this._lastScope = null
+    this._saveGroupTimer = null
     this.payload = null
     this.data = { nodes: [], edges: [] }
     this.signature = ''
@@ -355,6 +369,300 @@ export class G6TopologyGraph {
       this._groupRuntimeInstance = new GroupLayerRuntime(this)
     }
     return this._groupRuntimeInstance
+  }
+
+  /* ---------------------- 位置持久化（仅 Group 模式）----------------------
+   * 普通节点存「相对所属面板」的归一化坐标 [nx, ny]；
+   * 展开子节点存「相对父节点中心、按面板尺寸归一化」的偏移 [dx, dy]。
+   * 两者都分辨率无关：换分辨率 / scale / 重布局后面板尺寸变化，
+   * 节点按归一化量重新反归一化，自动落到合理位置。
+   * 按 `${scene}:${layout}` 分 scope 存 localStorage，不写进 payload。
+   */
+
+  _scopeKey() {
+    const scene = this.payload?.meta?.scene || 'default'
+    return `${scene}:${this.layoutId}`
+  }
+
+  _groupStateStorageKey() {
+    return `topology-group-positions:${this._scopeKey()}`
+  }
+
+  /** 读取当前 scope 的持久化状态到内存（仅在 scope 变化或首次时调用） */
+  _loadGroupState() {
+    this._groupPositions = new Map()
+    this._childRel = new Map()
+    this._expanded = new Map()
+    if (typeof localStorage === 'undefined') return
+    let raw = null
+    try {
+      raw = localStorage.getItem(this._groupStateStorageKey())
+    } catch {
+      raw = null
+    }
+    if (!raw) return
+    try {
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object') {
+        if (parsed.positions) {
+          for (const [id, pos] of Object.entries(parsed.positions)) {
+            if (Array.isArray(pos) && pos.length === 2) {
+              this._groupPositions.set(String(id), [Number(pos[0]) || 0, Number(pos[1]) || 0])
+            }
+          }
+        }
+        // 仅在开启「保持展开态」时才恢复展开子图，否则刷新回到折叠态
+        if (this._expandPersist && parsed.expanded) {
+          for (const [parentId, entry] of Object.entries(parsed.expanded)) {
+            if (entry && Array.isArray(entry.nodes)) {
+              this._expanded.set(String(parentId), {
+                parentId: String(parentId),
+                nodes: entry.nodes,
+                links: Array.isArray(entry.links) ? entry.links : [],
+                nodeIds: Array.isArray(entry.nodeIds) ? entry.nodeIds : [],
+                edgeIds: Array.isArray(entry.edgeIds) ? entry.edgeIds : [],
+              })
+            }
+          }
+        }
+        if (parsed.childRel) {
+          for (const [id, rel] of Object.entries(parsed.childRel)) {
+            if (Array.isArray(rel) && rel.length === 2) {
+              this._childRel.set(String(id), [Number(rel[0]) || 0, Number(rel[1]) || 0])
+            }
+          }
+        }
+      }
+    } catch {
+      // 解析失败：丢弃旧状态，按默认布局
+    }
+  }
+
+  /** 把内存状态序列化写回 localStorage（节流，避免拖拽时频繁写） */
+  _saveGroupState() {
+    if (typeof localStorage === 'undefined') return
+    if (this._saveGroupTimer) return
+    this._saveGroupTimer = setTimeout(() => {
+      this._saveGroupTimer = null
+      this._saveGroupStateNow()
+    }, 400)
+  }
+
+  _saveGroupStateNow() {
+    if (this._saveGroupTimer) {
+      clearTimeout(this._saveGroupTimer)
+      this._saveGroupTimer = null
+    }
+    if (typeof localStorage === 'undefined') return
+    const positions = {}
+    for (const [id, pos] of this._groupPositions) positions[id] = pos
+    const childRel = {}
+    for (const [id, rel] of this._childRel) childRel[id] = rel
+    const expanded = {}
+    if (this._expandPersist) {
+      for (const [parentId, entry] of this._expanded) {
+        expanded[parentId] = {
+          nodes: entry.nodes,
+          links: entry.links,
+          nodeIds: entry.nodeIds,
+          edgeIds: entry.edgeIds,
+        }
+      }
+    }
+    try {
+      localStorage.setItem(
+        this._groupStateStorageKey(),
+        JSON.stringify({ positions, childRel, expanded }),
+      )
+    } catch {
+      // 隐私模式 / 配额异常：忽略
+    }
+  }
+
+  _hasGroupOverrides() {
+    return this._groupPositions.size > 0 || this._childRel.size > 0
+  }
+
+  /** 从 this.data 的面板节点读取几何（_ingest 阶段、渲染前用） */
+  _panelGeomFromData(panelNode) {
+    if (!panelNode) return null
+    const style = panelNode.style || {}
+    const size = Array.isArray(style.size) ? style.size : [0, 0]
+    const width = Number(size[0]) || 0
+    const height = Number(size[1]) || 0
+    const cx = Number(style.x) || 0
+    const cy = Number(style.y) || 0
+    if (!width || !height) return null
+    return { left: cx - width / 2, top: cy - height / 2, width, height }
+  }
+
+  /**
+   * 把保存的归一化位置反归一化后写进 this.data 的节点 style。
+   * 在 `_ingest` 末尾调用（渲染前），用面板节点的 style 几何反算；
+   * 面板尺寸随后由 `_syncGroupPanelsAfterRender()` 按真实渲染包围盒重算。
+   */
+  _applyGroupState() {
+    if (!this._isGroupMode()) return
+    if (!this._groupPositions.size && !this._childRel.size) return
+
+    const nodes = this.data.nodes || []
+    const nodeById = new Map(nodes.map((node) => [String(node.id), node]))
+    // 清理孤儿：节点已不在数据中的坐标条目
+    for (const id of [...this._groupPositions.keys()]) {
+      if (!nodeById.has(id) || isGroupPanelData(nodeById.get(id).data)) {
+        this._groupPositions.delete(id)
+      }
+    }
+    for (const id of [...this._childRel.keys()]) {
+      if (!nodeById.has(id)) this._childRel.delete(id)
+    }
+
+    const panelGeom = new Map()
+    for (const node of nodes) {
+      if (isGroupPanelData(node.data)) {
+        const geom = this._panelGeomFromData(node)
+        if (geom) panelGeom.set(String(node.id), geom)
+      }
+    }
+    if (!panelGeom.size) return
+
+    // Pass 1：普通节点按所属面板几何反归一化
+    for (const [id, [nx, ny]] of this._groupPositions) {
+      const node = nodeById.get(id)
+      if (!node) continue
+      const geom = panelGeom.get(String(node.data?.__groupPanelId || ''))
+      if (!geom) continue
+      node.style = {
+        ...(node.style || {}),
+        x: geom.left + nx * geom.width,
+        y: geom.top + ny * geom.height,
+      }
+    }
+
+    // Pass 2：展开子节点按父节点位置 + 面板尺寸反归一化偏移。
+    // 嵌套展开时父节点可能也是别人的子节点，多趟应用保证父节点先就位、
+    // 子节点读到的是最终父位置（每次应用幂等，重复应用无害）。
+    for (let pass = 0; pass < 3; pass += 1) {
+      for (const [childId, [dx, dy]] of this._childRel) {
+        const child = nodeById.get(childId)
+        if (!child) continue
+        const parent = nodeById.get(String(child.data?.__expandedFrom || ''))
+        if (!parent) continue
+        const geom = panelGeom.get(
+          String(child.data?.__groupPanelId || parent.data?.__groupPanelId || ''),
+        )
+        if (!geom) continue
+        const px = Number(parent.style?.x) || 0
+        const py = Number(parent.style?.y) || 0
+        child.style = {
+          ...(child.style || {}),
+          x: px + dx * geom.width,
+          y: py + dy * geom.height,
+        }
+      }
+    }
+  }
+
+  /**
+   * 渲染后按真实节点包围盒重新拟合面板尺寸/位置，并推开重叠面板。
+   * Group 模式下 `_resolveRenderedOverlaps` 是 no-op，故有位置覆盖时需主动补这一步。
+   */
+  async _syncGroupPanelsAfterRender() {
+    if (!this._isGroupMode() || !this.graph || this.destroying) return
+    if (!this._hasGroupOverrides()) return
+    const runtime = this._group()
+    if (!runtime) return
+    await runtime.syncAllPanels({ draw: false })
+    await runtime.resolvePanels()
+    await this.graph.draw({ animation: false }).catch(() => {})
+  }
+
+  /** 计算并保存一个普通节点相对其面板的归一化坐标（拖拽结束后调用） */
+  _normalizeNode(id) {
+    if (!this.graph || !this._isGroupMode()) return
+    const data = this.elements.get(String(id))
+    if (!data || isGroupPanelData(data)) return
+    const panelId = String(data.__groupPanelId || '')
+    if (!panelId) return
+    const runtime = this._group()
+    const panel = runtime?.panelById(panelId)
+    const rect = panel ? runtime.panelRect(panel) : null
+    if (!rect || !rect.width || !rect.height) return
+    let pos = null
+    try {
+      pos = this.graph.getElementPosition(String(id))
+    } catch {
+      pos = null
+    }
+    if (!pos) return
+    const nx = (Number(pos[0]) - rect.left) / rect.width
+    const ny = (Number(pos[1]) - rect.top) / rect.height
+    if (!Number.isFinite(nx) || !Number.isFinite(ny)) return
+    this._groupPositions.set(String(id), [nx, ny])
+    this._saveGroupState()
+  }
+
+  /** 计算并保存一个展开子节点相对父节点中心、按面板尺寸归一化的偏移 */
+  _normalizeChild(childId) {
+    if (!this.graph || !this._isGroupMode()) return
+    const childData = this.elements.get(String(childId))
+    if (!childData) return
+    const parentId = String(childData.__expandedFrom || '')
+    if (!parentId) return
+    const runtime = this._group()
+    const panelId = String(childData.__groupPanelId || '')
+    const panel = runtime?.panelById(panelId)
+    const rect = panel ? runtime.panelRect(panel) : null
+    if (!rect || !rect.width || !rect.height) return
+    let cpos = null
+    let ppos = null
+    try {
+      cpos = this.graph.getElementPosition(String(childId))
+      ppos = this.graph.getElementPosition(parentId)
+    } catch {
+      return
+    }
+    if (!cpos || !ppos) return
+    const dx = (Number(cpos[0]) - Number(ppos[0])) / rect.width
+    const dy = (Number(cpos[1]) - Number(ppos[1])) / rect.height
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return
+    this._childRel.set(String(childId), [dx, dy])
+    this._saveGroupState()
+  }
+
+  /** groupRuntime.endDrag 回调：节点拖动后归一化保存；面板拖动不写（归一化未变） */
+  _onGroupDragEnd(drag) {
+    if (!drag || !this._isGroupMode()) return
+    if (drag.type === 'node') {
+      const id = String(drag.nodeId)
+      // 展开子节点按相对父节点保存；普通节点按相对面板保存
+      if (this.elements.get(id)?.__expandedFrom) this._normalizeChild(id)
+      else this._normalizeNode(id)
+    }
+    // 拖面板时成员同步平移，相对关系不变，无需更新归一化坐标
+  }
+
+  /** 切换「保持展开态」：开 → 持久化当前展开；关 → 不再写展开（刷新回折叠态） */
+  setExpandPersist(on) {
+    this._expandPersist = Boolean(on)
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem('topology-group-expand-persist', this._expandPersist ? '1' : '0')
+      } catch {
+        // 隐私模式：忽略
+      }
+    }
+    // 立即按新开关重写一次存储：开则落盘当前展开，关则清除持久化的展开
+    this._saveGroupStateNow()
+  }
+
+  /** 清空保存的位置并重新布局（UI「重置位置」操作） */
+  async resetGroupPositions() {
+    this._groupPositions.clear()
+    this._childRel.clear()
+    if (!this._expandPersist) this._expanded.clear()
+    this._saveGroupStateNow()
+    if (this.payload) await this.setData(this.payload, { relayout: true })
   }
 
   _comboOptions() {
@@ -731,6 +1039,13 @@ export class G6TopologyGraph {
       await this._group()?.applyZOrder?.()
     }
 
+    // 开启「保持展开态」时：把子节点相对父节点归一化落盘，
+    // 刷新后才能恢复到本次放置的位置（而非布局默认网格）
+    if (this._expandPersist) {
+      for (const childId of nodeIds) this._normalizeChild(childId)
+      this._saveGroupStateNow()
+    }
+
     // 层变宽后新节点可能在视口外：只调整视角，不改任何层的世界坐标
     if (this.autoFit) await this.graph.fitView(undefined, { duration: 220 })
 
@@ -771,6 +1086,9 @@ export class G6TopologyGraph {
       }
     }
     this._expanded.delete(key)
+    // 清理被移除子节点（含级联）的相对位置记录，避免孤儿条目
+    for (const nodeId of nodeIds) this._childRel.delete(nodeId)
+    if (this._expandPersist) this._saveGroupStateNow()
 
     const parentData = this.elements.get(key)
     const panelId = parentData?.__groupPanelId
@@ -1054,6 +1372,12 @@ export class G6TopologyGraph {
 
   _ingest(payload) {
     this.payload = payload
+    // scope（scene:layout）变化时换装对应的位置持久化状态；同 scope 的数据轮询保留内存态
+    const scope = this._scopeKey()
+    if (scope !== this._lastScope) {
+      this._lastScope = scope
+      this._loadGroupState()
+    }
     // 展开的子图先并回数据，再按当前模式生成 G6 数据
     const source = this._expandedPayload(payload)
     const mode = this._dataMode()
@@ -1086,6 +1410,8 @@ export class G6TopologyGraph {
     this.directed = payload?.meta?.directed === true || payload?.meta?.scene === 'graph'
     this._syncSignatures()
     this._pruneEmphasis()
+    // 把保存的归一化位置反归一化覆盖到 this.data（渲染前）
+    this._applyGroupState()
   }
 
   _syncSignatures() {
@@ -1155,6 +1481,8 @@ export class G6TopologyGraph {
         // 布局态：先按统一灭点绘制，再在末尾冻结每层斜率
         this._resetLayerSlopes()
         await this._syncPerspectiveOrigin()
+        // Group 模式下若有保存的位置覆盖，渲染后按真实包围盒重算面板尺寸
+        await this._syncGroupPanelsAfterRender()
         this._bindHistory()
         await this._resolveRenderedOverlaps()
         await this._freezeLayerSlopes()
@@ -1200,6 +1528,7 @@ export class G6TopologyGraph {
         this.graph.setData(this.data)
         await this.graph.render()
         await this._syncPerspectiveOrigin()
+        await this._syncGroupPanelsAfterRender()
         await this._resolveRenderedOverlaps()
         await this._freezeLayerSlopes()
         if (this.autoFit) await this.graph.fitView(undefined, { duration: 220 })

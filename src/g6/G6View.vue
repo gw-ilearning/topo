@@ -212,6 +212,18 @@ function isNodeExpanded(id) {
   return Boolean(controller.value?._expanded?.has?.(String(id)))
 }
 
+function setExpandPersist(on) {
+  controller.value?.setExpandPersist?.(on)
+}
+
+function resetGroupPositions() {
+  return controller.value?.resetGroupPositions?.() || Promise.resolve()
+}
+
+function saveGroupStateNow() {
+  controller.value?._saveGroupStateNow?.()
+}
+
 function setLayoutOptions(options) {
   return controller.value?.setLayoutOptions?.(options) || Promise.resolve()
 }
@@ -310,6 +322,9 @@ defineExpose({
   expandNode,
   collapseNode,
   isNodeExpanded,
+  setExpandPersist,
+  resetGroupPositions,
+  saveGroupStateNow,
   setLayoutOptions,
   checkOverlaps,
   zoomBy,

@@ -108,6 +108,19 @@
               </option>
             </select>
           </label>
+
+          <button
+            v-if="renderer === 'g6' && g6LayoutActive === 'g6-group-layer'"
+            type="button"
+            class="rail-btn rail-action"
+            :class="{ active: expandPersist }"
+            :title="expandPersist ? t('rail.expandPersistOn') : t('rail.expandPersistOff')"
+            :aria-pressed="expandPersist"
+            @click="toggleExpandPersist"
+          >
+            <Icon name="bookmark" :size="16" />
+            <span v-if="!workspace.collapsed" class="rail-label">{{ t('rail.expandPersist') }}</span>
+          </button>
         </div>
 
         <div v-if="!workspace.collapsed" class="rail-foot">
@@ -285,6 +298,8 @@ const RENDERER_KEY = 'topology-renderer'
 const ONBOARD_KEY = 'topology-onboarded'
 const DEPTH_25D_KEY = 'topology-combo-depth-25d'
 const TRAPEZOID_ANGLE_KEY = 'topology-combo-trapezoid-angle'
+// Group 模式「保持展开态」开关：开启后刷新保留右键展开的子拓扑
+const EXPAND_PERSIST_KEY = 'topology-group-expand-persist'
 
 function resolveInitialTheme() {
   const saved = localStorage.getItem(THEME_KEY)
@@ -349,6 +364,8 @@ const depth25d = ref(localStorage.getItem(DEPTH_25D_KEY) !== '0')
 // 梯形侧边倾角（相对竖直方向），左右对称；用户选择后记住
 const trapezoidAngle = ref(resolveInitialTrapezoidAngle())
 const trapezoidAngleOptions = [0, 10, 15, 20, 25, 30]
+// Group 模式：是否随刷新保持「右键展开的子拓扑」；默认关闭，刷新回到折叠态
+const expandPersist = ref(localStorage.getItem(EXPAND_PERSIST_KEY) === '1')
 const activeStatuses = ref(
   Array.isArray(initialState.activeStatuses) && initialState.activeStatuses.length
     ? initialState.activeStatuses
@@ -919,6 +936,14 @@ function persistTrapezoidAngle() {
   localStorage.setItem(TRAPEZOID_ANGLE_KEY, String(trapezoidAngle.value))
 }
 
+/** Group 模式：切换「保持展开态」（开启后刷新保留右键展开的子拓扑） */
+function toggleExpandPersist() {
+  expandPersist.value = !expandPersist.value
+  localStorage.setItem(EXPAND_PERSIST_KEY, expandPersist.value ? '1' : '0')
+  g6Ref.value?.setExpandPersist?.(expandPersist.value)
+  showToast(expandPersist.value ? t('rail.expandPersistOn') : t('rail.expandPersistOff'))
+}
+
 function applyTheme(mode) {
   const next = mode === 'light' ? 'light' : 'dark'
   theme.value = next
@@ -1079,6 +1104,8 @@ function handleG6Event({ name, payload }) {
 
 function handleG6Ready() {
   updateHistoryFlags()
+  // 控制器就绪后同步「保持展开态」开关，使其按持久化状态加载/恢复展开子图
+  g6Ref.value?.setExpandPersist?.(expandPersist.value)
   nextTick(() => g6Ref.value?.fitView?.())
 }
 
@@ -1205,6 +1232,7 @@ onBeforeUnmount(() => {
   if (toastTimer) clearTimeout(toastTimer)
   if (guideTimer) clearTimeout(guideTimer)
   stateSaver.flush()
+  g6Ref.value?.saveGroupStateNow?.()
   teardownEngine()
 })
 
