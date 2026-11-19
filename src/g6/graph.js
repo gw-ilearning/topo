@@ -2471,10 +2471,20 @@ export class G6TopologyGraph {
         strokeOpacity: 0.4,
         corner: 'rounded',
       })
-      // Hull 插件只在 AFTER_RENDER / 成员元素更新时重算轮廓。
-      // 高亮上下游时，被高亮的节点自身状态没变（变的是其他节点置灰），
-      // 所以必须主动重绘一次，否则轮廓要等到鼠标移入成员节点才出现。
-      this.graph.draw({ animation: false }).catch(() => {})
+      // updatePlugin 只把 members / 样式合并进插件 options（BaseExtension.update
+      // 不会触发 Hull 重算路径）。Hull 只在 AFTER_RENDER / 成员元素自身更新时重算，
+      // 而高亮上下游时被高亮节点状态没变（只是其他节点置灰），AFTER_ELEMENT_UPDATE
+      // 不会为它们触发；仅靠 draw() 的 AFTER_RENDER 在某些时序下会被短路跳过，
+      // 这就是「轮廓要等鼠标移入成员节点才出现」的根因。
+      // 因此直接拿插件实例强制重算路径，不依赖事件时序。
+      const hull = this.graph.getPluginInstance?.('hull-analysis')
+      if (hull?.shape && typeof hull.updateMember === 'function') {
+        // updateMember 内部以 forceUpdate=true 重算 path 并立即更新 shape
+        hull.updateMember(members)
+      } else {
+        // 实例尚未就绪（首次渲染前）时回退到主动重绘，由 AFTER_RENDER 兜底
+        this.graph.draw({ animation: false }).catch(() => {})
+      }
     } catch (error) {
       console.warn('[g6] Hull 更新失败', error)
     }
