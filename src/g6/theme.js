@@ -6,6 +6,12 @@
  */
 
 import { COMBO_LAYER_DEFAULTS, TRAPEZOID_COMBO_TYPE, comboLayerDepth } from './comboConfig.js'
+import {
+  GROUP_PANEL_TYPE,
+  groupLayerDepth,
+  groupTrapezoidSlope,
+  isGroupPanelData,
+} from './groupConfig.js'
 
 export const G6_THEMES = {
   dark: {
@@ -145,17 +151,22 @@ function applyOverrides(style, datum, overrides = []) {
 }
 
 /** G6 节点配置：形状、尺寸、状态、标签全部由 G6 自身样式系统渲染 */
-export function buildNodeOptions(theme, { showLabels = true, colorMode = 'status', overrides = [] } = {}) {
+export function buildNodeOptions(theme, { showLabels = true, colorMode = 'status', overrides = [], panel = null } = {}) {
   return {
-    type: (datum) => g6NodeShape(datum.data || {}),
+    type: (datum) =>
+      panel && isGroupPanelData(datum.data)
+        ? panel.type
+        : g6NodeShape(datum.data || {}),
     style: (datum) => {
       const data = datum.data || {}
+      if (panel && isGroupPanelData(data)) return panel.style(datum)
       const shape = g6NodeShape(data)
       const isRect = shape === 'rect' || shape === 'ellipse'
       const accent = g6NodeAccent(data, theme, colorMode)
       const show = showLabels && data.hideLabel !== true
       // 2.5D 透视：远层节点整体缩小，文字、投影同步缩放，避免视觉突兀
-      const scale = Number(data.__comboScale) || 1
+      // Group 版写 `__groupScale`，Combo 版写 `__comboScale`
+      const scale = Number(data.__groupScale ?? data.__comboScale) || 1
       const baseSize = g6NodeSize(data)
       const size = scale === 1
         ? baseSize
@@ -352,6 +363,73 @@ export function buildComboOptions(theme, { showLabels = true, layoutOptions = {}
         labelBackgroundFill: theme.nodeLabelBg,
         labelBackgroundRadius: 4,
         labelBackgroundPadding: [1, 6],
+      }
+    },
+    state: {
+      active: {
+        lineWidth: 2,
+        shadowBlur: 16,
+      },
+      highlight: {
+        lineWidth: 2.4,
+        stroke: theme.edgeActive,
+      },
+    },
+  }
+}
+
+/**
+ * 「分层 Group」梯形面板样式
+ *
+ * 面板是普通节点，因此这里返回 { type, style } 供 `buildNodeOptions()` 分流。
+ * 视觉参数与 `buildComboOptions()` 保持一致：同样按 2.5D 深度调整
+ * 填充透明度、描边、投影和标题字号，只是绘制载体从 Combo 换成 Node。
+ */
+export function buildGroupPanelOptions(theme, { showLabels = true, layoutOptions = {} } = {}) {
+  const perspective = layoutOptions.perspective !== false
+  const rawSlope = groupTrapezoidSlope(layoutOptions)
+  const fallbackSlopes =
+    rawSlope == null ? undefined : [rawSlope, rawSlope]
+
+  return {
+    type: GROUP_PANEL_TYPE,
+    style: (datum) => {
+      const data = datum.data || {}
+      const show = showLabels && data.hideLabel !== true
+      const label = data.name || String(datum.id || '')
+      const scale = Number(data.scale) || 1
+      const depth =
+        perspective === false ? 1 : groupLayerDepth(scale, layoutOptions)
+      const labelScale = Math.max(0.86, scale)
+
+      const fillOpacity = 0.4 + 0.4 * depth
+      const strokeOpacity = 0.5 + 0.5 * depth
+      const shadowBlur = 9 * (0.5 + 0.6 * depth)
+      const shadowOffsetY = 4 * (0.5 + depth)
+
+      return {
+        // 布局会写入精确尺寸；这里不设置 size，避免样式覆盖布局结果
+        sideSlopes: fallbackSlopes,
+        panelLabelHeight: 26 * labelScale,
+        panelLabelInset: 16,
+        fill: theme.layerFill,
+        fillOpacity,
+        stroke: theme.layerStroke,
+        strokeOpacity,
+        lineWidth: 1 + 0.5 * depth,
+        opacity: 1,
+        shadowColor: theme.edgeActive,
+        shadowBlur,
+        shadowOffsetY,
+        shadowOpacity: 0.08 + 0.08 * depth,
+        cursor: 'grab',
+        label: show,
+        labelText: show ? label : '',
+        labelFill: theme.nodeLabel,
+        labelFontSize: 12.5 * labelScale,
+        labelFontWeight: 700,
+        labelLetterSpacing: 0.6,
+        labelOpacity: 0.92,
       }
     },
     state: {

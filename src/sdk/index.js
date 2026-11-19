@@ -65,6 +65,16 @@ export {
 } from '../g6/comboConfig.js'
 
 export {
+  GROUP_LAYER_LAYOUT_ID,
+  GROUP_PANEL_TYPE,
+  GROUP_LAYER_DEFAULTS,
+  GROUP_LAYER_PRESET_OPTIONS,
+  isGroupLayerLayout,
+  groupTrapezoidSlope,
+  groupPanelId,
+} from '../g6/groupConfig.js'
+
+export {
   rectFromCenter,
   rectFromTopLeft,
   rectsOverlap,

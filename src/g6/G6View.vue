@@ -200,6 +200,18 @@ function relayout() {
   return controller.value?.relayout?.() || Promise.resolve()
 }
 
+function expandNode(id) {
+  return controller.value?.expandNode?.(id) || Promise.resolve(false)
+}
+
+function collapseNode(id) {
+  return controller.value?.collapseNode?.(id) || Promise.resolve(false)
+}
+
+function isNodeExpanded(id) {
+  return Boolean(controller.value?._expanded?.has?.(String(id)))
+}
+
 function setLayoutOptions(options) {
   return controller.value?.setLayoutOptions?.(options) || Promise.resolve()
 }
@@ -295,6 +307,9 @@ defineExpose({
   clearHighlight,
   getEmphasis,
   relayout,
+  expandNode,
+  collapseNode,
+  isNodeExpanded,
   setLayoutOptions,
   checkOverlaps,
   zoomBy,

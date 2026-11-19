@@ -4,6 +4,7 @@ import {
   buildComboOptions,
   buildEdgeOptions,
   buildGridPlugin,
+  buildGroupPanelOptions,
   buildNodeOptions,
   g6NodeAccent,
   g6NodeShape,
@@ -18,13 +19,24 @@ import {
   isComboLayerLayout,
 } from './comboConfig.js'
 import {
+  GROUP_LAYER_LAYOUT_ID,
+  isGroupLayerLayout,
+  isGroupPanelData,
+} from './groupConfig.js'
+import { toGroupData } from './groupData.js'
+import { GroupLayerRuntime } from './groupRuntime.js'
+import {
   findRectOverlaps,
   rectFromTopLeft,
+  rectsOverlap,
   separateRectRows,
   separateRects,
 } from './collision.js'
+import { extractSubgraph } from '../topology/transform.js'
 import './comboLayerLayout.js'
 import './trapezoidCombo.js'
+import './groupLayerLayout.js'
+import './groupPanelNode.js'
 import {
   collectNeighborhood,
   createGraphIndex,
@@ -197,6 +209,14 @@ export class G6TopologyGraph {
     this.pluginFlags = defaultPluginFlags(options.plugins || options)
 
     this.graph = null
+    // Group 分层的运行时（面板拖拽联动 / 尺寸拟合 / 层级），惰性创建
+    this._groupRuntimeInstance = null
+    // 右键「展开子拓扑」的会话状态：parentId -> { nodes, links, nodeIds, edgeIds }
+    // 只存在于控制器内存中，不写入 payload，轮询时由 _expandedPayload() 重新合并
+    this._expanded = new Map()
+    // 展开前记录的层面板几何：panelId -> { base, synced, dirty }
+    // 折叠回原始成员时用它精确还原，避免 syncPanel 与布局阶段尺寸口径不同造成的轻微漂移
+    this._panelSnapshots = new Map()
     this.payload = null
     this.data = { nodes: [], edges: [] }
     this.signature = ''
@@ -294,6 +314,13 @@ export class G6TopologyGraph {
       showLabels: this.showLabels,
       colorMode: this.colorMode,
       overrides: this._nodeOverrides(),
+      // Group 分层：给面板节点单独一套梯形样式与自定义节点类型
+      panel: this._isGroupMode()
+        ? buildGroupPanelOptions(this.theme, {
+            showLabels: this.showLabels,
+            layoutOptions: this._layoutOptions(),
+          })
+        : null,
     })
   }
 
@@ -307,6 +334,27 @@ export class G6TopologyGraph {
   _isComboMode() {
     if (isComboLayerLayout(this.layoutId)) return true
     return this._perLayoutStyle().combos === true
+  }
+
+  /** 是否启用「分层 Group」：层是普通节点，不是 Combo */
+  _isGroupMode() {
+    return isGroupLayerLayout(this.layoutId)
+  }
+
+  /** 当前数据模式：决定 `_ingest` 生成 combos 还是 group 面板节点 */
+  _dataMode() {
+    if (this._isGroupMode()) return 'group'
+    if (this._isComboMode()) return 'combo'
+    return 'plain'
+  }
+
+  /** Group 运行时（只有 group 布局才会创建） */
+  _group() {
+    if (!this._isGroupMode() || !this.graph) return null
+    if (!this._groupRuntimeInstance) {
+      this._groupRuntimeInstance = new GroupLayerRuntime(this)
+    }
+    return this._groupRuntimeInstance
   }
 
   _comboOptions() {
@@ -328,20 +376,26 @@ export class G6TopologyGraph {
     const id = event?.target?.id ? String(event.target.id) : null
     if (!id) return []
     const data = this.elements.get(id)
-    const isNode = Boolean(data)
+    // 分组面板只是层背景，不提供节点菜单
+    if (!data || isGroupPanelData(data)) return []
+
     const items = []
-    if (isNode) {
-      items.push({ name: '查看详情 / Details', value: `detail:${id}` })
-      items.push({ name: '聚焦节点 / Focus', value: `focus:${id}` })
-      items.push({ name: '高亮上下游 / Neighbors', value: `neighbors:${id}` })
-      if (data.subgraph || data.children?.length) {
-        items.push({ name: '下钻子拓扑 / Drill down', value: `drill:${id}` })
+    items.push({ name: '查看详情 / Details', value: `detail:${id}` })
+    items.push({ name: '聚焦节点 / Focus', value: `focus:${id}` })
+    items.push({ name: '高亮上下游 / Neighbors', value: `neighbors:${id}` })
+
+    if (data.subgraph || data.children?.length) {
+      if (this._expanded.has(id)) {
+        items.push({ name: '折叠子拓扑 / Collapse', value: `collapse:${id}` })
+      } else {
+        items.push({ name: '展开子拓扑 / Expand', value: `expand:${id}` })
       }
-      if (data.kind === 'group') {
-        items.push({ name: '展开聚合组 / Expand group', value: `drill:${id}` })
-      }
-      items.push({ name: '复制 ID / Copy ID', value: `copy:${id}` })
+      items.push({ name: '下钻子拓扑 / Drill down', value: `drill:${id}` })
     }
+    if (data.kind === 'group') {
+      items.push({ name: '展开聚合组 / Expand group', value: `drill:${id}` })
+    }
+    items.push({ name: '复制 ID / Copy ID', value: `copy:${id}` })
     return items
   }
 
@@ -422,6 +476,8 @@ export class G6TopologyGraph {
       // 画布本身保持透明，主题背景由 host 元素的 CSS 负责。
       // 这样深浅主题切换无需重建画布，也不会残留上一套主题的背景位图。
       background: 'transparent',
+      // 画布内边距：fitView 时在四周留出余量，避免梯形侧边 / 投影贴边被裁
+      padding: 16,
       data: this.data,
       layout: this._layoutOptions(),
       node: this._nodeOptions(),
@@ -454,9 +510,9 @@ export class G6TopologyGraph {
   }
 
   async _withoutAnimation(task) {
-    // 只有 Combo 分层布局需要按渲染包围盒拟合 padding / 灭点，
+    // Combo / Group 分层都需要按渲染包围盒拟合面板与灭点，
     // 其他布局保留原有过渡动画，避免无谓的行为变化。
-    if (!this._isComboMode()) return task()
+    if (!this._isComboMode() && !this._isGroupMode()) return task()
     const restore = !this._suppressAnimation
     if (restore) this._setAnimationSuppressed(true)
     try {
@@ -526,7 +582,14 @@ export class G6TopologyGraph {
     const data = this.elements.get(id)
     if (action === 'focus') this.focus(id)
     else if (action === 'neighbors') this.highlightNeighbors(id, { depth: 2 })
-    else if (action === 'drill') this.callbacks.onContextAction?.({ action: 'drill', id, data })
+    else if (action === 'expand') {
+      // 展开 / 折叠是异步渲染，事件由方法内部在完成后发出
+      this.expandNode(id).catch(() => {})
+      return
+    } else if (action === 'collapse') {
+      this.collapseNode(id).catch(() => {})
+      return
+    } else if (action === 'drill') this.callbacks.onContextAction?.({ action: 'drill', id, data })
     else if (action === 'copy') {
       try {
         navigator.clipboard?.writeText(id)
@@ -540,21 +603,475 @@ export class G6TopologyGraph {
     this._emitCustom(TOPOLOGY_EVENTS.NODE_CONTEXT_ACTION, { action, id, data })
   }
 
+  /**
+   * 就地展开节点的子拓扑（右键「展开子拓扑」）。
+   *
+   * 与「下钻」的区别：父节点保留，子节点并进当前图，不替换视图。
+   * 增量插入策略：
+   * - 只向当前层追加节点，其他层的坐标完全不动；
+   * - 子节点继承父节点的 layer / group，因此落在同一个分组面板；
+   * - 空间不够时优先增加列数，保持层高不变；
+   * - 面板交由 GroupLayerRuntime.syncPanel() 重新拟合。
+   */
+  async expandNode(id) {
+    if (!this.graph || this.destroying) return false
+    const key = String(id)
+    if (this._expanded.has(key)) return false
+
+    const parentData = this.elements.get(key)
+    if (!parentData) return false
+    if (isGroupPanelData(parentData)) return false
+
+    const sub = extractSubgraph(
+      { nodes: [parentData], meta: this.payload?.meta || {} },
+      key,
+    )
+    if (!sub || !sub.nodes?.length) return false
+
+    const parentNode = this.data.nodes.find((node) => String(node.id) === key)
+    const isGroup = this._isGroupMode()
+    const scale = Number(parentData.__groupScale ?? parentData.__comboScale) || 1
+
+    const degree = new Map()
+    for (const link of sub.links || []) {
+      degree.set(String(link.source), (degree.get(String(link.source)) || 0) + 1)
+      degree.set(String(link.target), (degree.get(String(link.target)) || 0) + 1)
+    }
+
+    const payloadChildren = []
+    const nodeIds = []
+    for (const child of sub.nodes) {
+      const childId = String(child.id)
+      if (this.elements.has(childId)) continue
+      payloadChildren.push({
+        ...child,
+        id: childId,
+        // 子图节点是父节点的下钻视图，统一归到父层，避免全部掉进「未分层」
+        layer: parentData.layer,
+        group: child.group || parentData.group,
+        kind: child.kind || 'node',
+        degree: degree.get(childId) || 0,
+        __expandedFrom: key,
+      })
+      nodeIds.push(childId)
+    }
+    if (!payloadChildren.length) return false
+
+    const childLinks = (sub.links || []).filter(
+      (link) =>
+        nodeIds.includes(String(link.source)) &&
+        nodeIds.includes(String(link.target)),
+    )
+
+    const positions = this._placeExpandedChildren({
+      parentId: key,
+      parentData,
+      children: payloadChildren,
+      scale,
+    })
+
+    const graphNodes = payloadChildren.map((raw) => {
+      const data = { ...raw }
+      if (isGroup) {
+        data.__groupId = parentData.__groupId
+        data.__groupPanelId = parentData.__groupPanelId
+        data.__groupScale = parentData.__groupScale
+      } else if (parentData.__comboScale != null) {
+        data.__comboScale = parentData.__comboScale
+      }
+      const node = {
+        id: String(raw.id),
+        data,
+        style: { ...(positions.get(String(raw.id)) || {}), zIndex: 1 },
+      }
+      if (!isGroup && parentNode?.combo) node.combo = parentNode.combo
+      return node
+    })
+
+    const graphEdges = childLinks.map((link) => ({
+      id: String(link.id),
+      source: String(link.source),
+      target: String(link.target),
+      data: { ...link, __expandedFrom: key },
+    }))
+
+    // 先记录状态再写入 G6，绘制过程中就能按新成员拟合面板
+    this._expanded.set(key, {
+      parentId: key,
+      nodes: payloadChildren.map((node) => ({ ...node })),
+      links: childLinks.map((link) => ({ ...link })),
+      nodeIds,
+      edgeIds: graphEdges.map((edge) => edge.id),
+    })
+
+    this.graph.addNodeData(graphNodes)
+    if (graphEdges.length) this.graph.addEdgeData(graphEdges)
+
+    this.data.nodes.push(...graphNodes)
+    this.data.edges.push(...graphEdges)
+    for (const node of graphNodes) this.elements.set(String(node.id), node.data)
+    for (const edge of graphEdges) {
+      if (!this.edgesByNode.has(edge.source)) this.edgesByNode.set(edge.source, [])
+      if (!this.edgesByNode.has(edge.target)) this.edgesByNode.set(edge.target, [])
+      this.edgesByNode.get(edge.source).push(edge)
+      if (edge.source !== edge.target) this.edgesByNode.get(edge.target).push(edge)
+    }
+    this.index = createGraphIndex(this.data)
+    this._syncSignatures()
+
+    await this.graph.draw({ animation: false })
+
+    // 只扩展父节点所在层；其他层的 x / y / size 完全不动
+    const panelId = parentData.__groupPanelId
+    if (panelId) {
+      this._snapshotPanel(panelId)
+      this._group()?.syncPanel(panelId, { draw: false })
+      await this.graph.draw({ animation: false })
+      this._recordSyncedPanel(panelId)
+      await this._group()?.applyZOrder?.()
+    }
+
+    // 层变宽后新节点可能在视口外：只调整视角，不改任何层的世界坐标
+    if (this.autoFit) await this.graph.fitView(undefined, { duration: 220 })
+
+    this.applyStates()
+    this._emitCustom(TOPOLOGY_EVENTS.NODE_CONTEXT_ACTION, {
+      action: 'expand',
+      id: key,
+      data: parentData,
+      count: payloadChildren.length,
+    })
+    return true
+  }
+
+  /**
+   * 原地收缩节点的子拓扑（右键「折叠子拓扑」）。
+   *
+   * 会级联移除「子节点自己又被展开」的内容，避免留下孤儿节点。
+   */
+  async collapseNode(id) {
+    if (!this.graph || this.destroying) return false
+    const key = String(id)
+    const entry = this._expanded.get(key)
+    if (!entry) return false
+
+    const nodeIds = new Set(entry.nodeIds)
+    const edgeIds = new Set(entry.edgeIds)
+
+    // 子节点可能自己也被展开过，递归收集
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const [parentId, child] of [...this._expanded]) {
+        if (parentId === key || !nodeIds.has(parentId)) continue
+        child.nodeIds.forEach((nodeId) => nodeIds.add(nodeId))
+        child.edgeIds.forEach((edgeId) => edgeIds.add(edgeId))
+        this._expanded.delete(parentId)
+        changed = true
+      }
+    }
+    this._expanded.delete(key)
+
+    const parentData = this.elements.get(key)
+    const panelId = parentData?.__groupPanelId
+
+    this.graph.removeEdgeData([...edgeIds])
+    this.graph.removeNodeData([...nodeIds])
+
+    this.data = {
+      ...this.data,
+      nodes: this.data.nodes.filter((node) => !nodeIds.has(String(node.id))),
+      edges: this.data.edges.filter((edge) => {
+        const id = String(edge.id)
+        return (
+          !edgeIds.has(id) &&
+          !nodeIds.has(String(edge.source)) &&
+          !nodeIds.has(String(edge.target))
+        )
+      }),
+    }
+    for (const nodeId of nodeIds) this.elements.delete(nodeId)
+    this.edgesByNode = new Map()
+    for (const edge of this.data.edges) {
+      if (!this.edgesByNode.has(edge.source)) this.edgesByNode.set(edge.source, [])
+      if (!this.edgesByNode.has(edge.target)) this.edgesByNode.set(edge.target, [])
+      this.edgesByNode.get(edge.source).push(edge)
+      if (edge.source !== edge.target) this.edgesByNode.get(edge.target).push(edge)
+    }
+    this.index = createGraphIndex(this.data)
+    this._syncSignatures()
+
+    await this.graph.draw({ animation: false })
+
+    if (panelId) {
+      const snapshot = this._panelSnapshots.get(panelId)
+      const stillExpanded = [...this._expanded.values()].some(
+        (item) => this.elements.get(item.parentId)?.__groupPanelId === panelId,
+      )
+      // 该层已回到原始成员、且期间没有被手动拖动：直接还原展开前的几何
+      if (!stillExpanded && snapshot?.base && !snapshot.dirty) {
+        this._restorePanel(panelId, snapshot.base)
+        this._panelSnapshots.delete(panelId)
+      } else {
+        this._group()?.syncPanel(panelId, { draw: false })
+      }
+      await this.graph.draw({ animation: false })
+      await this._group()?.applyZOrder?.()
+    }
+
+    if (this.autoFit) await this.graph.fitView(undefined, { duration: 220 })
+
+    this.applyStates()
+    this._emitCustom(TOPOLOGY_EVENTS.NODE_CONTEXT_ACTION, {
+      action: 'collapse',
+      id: key,
+      data: parentData || null,
+      count: nodeIds.size,
+    })
+    return true
+  }
+
+  /** 第一次展开某层时，记录面板的原始几何 */
+  _snapshotPanel(panelId) {
+    if (this._panelSnapshots.has(panelId)) return
+    const runtime = this._group()
+    const panel = runtime?.panelById(panelId)
+    if (!panel) return
+    let position = [0, 0]
+    try {
+      position = this.graph.getElementPosition(panelId) || position
+    } catch {
+      // 元素可能尚未渲染
+    }
+    const size = Array.isArray(panel.style?.size) ? [...panel.style.size] : [0, 0]
+    const sideSlopes = Array.isArray(panel.style?.sideSlopes)
+      ? [...panel.style.sideSlopes]
+      : undefined
+    this._panelSnapshots.set(panelId, {
+      base: { x: position[0], y: position[1], size, sideSlopes },
+      synced: null,
+      // 用户手动拖过面板 / 层内节点后，不再盲目还原，交给 syncPanel 重新拟合
+      dirty: false,
+    })
+  }
+
+  /** 记录本次展开拟合后的几何，用于判断层是否仍在展开状态 */
+  _recordSyncedPanel(panelId) {
+    const snapshot = this._panelSnapshots.get(panelId)
+    if (!snapshot) return
+    const panel = this._group()?.panelById(panelId)
+    if (!panel) return
+    let position = [0, 0]
+    try {
+      position = this.graph.getElementPosition(panelId) || position
+    } catch {
+      return
+    }
+    snapshot.synced = {
+      x: position[0],
+      y: position[1],
+      size: Array.isArray(panel.style?.size) ? [...panel.style.size] : [0, 0],
+    }
+  }
+
+  /** 折叠回原始成员后，把面板恢复到展开前的几何 */
+  _restorePanel(panelId, base) {
+    if (!base) return false
+    const panel = this._group()?.panelById(panelId)
+    if (!panel) return false
+    const style = { x: base.x, y: base.y, size: [...base.size] }
+    if (Array.isArray(base.sideSlopes)) {
+      style.sideSlopes = [...base.sideSlopes]
+      panel.data = { ...(panel.data || {}), __groupSlopes: [...base.sideSlopes] }
+    }
+    panel.style = { ...(panel.style || {}), ...style }
+    this.graph.updateNodeData([{ id: panelId, style }])
+    return true
+  }
+
+  /** 面板被用户拖动过：标记脏，折叠时不再还原快照 */
+  _notePanelEdited(panelId) {
+    if (!panelId) return
+    const snapshot = this._panelSnapshots.get(String(panelId))
+    if (snapshot) snapshot.dirty = true
+  }
+
+  /**
+   * 为展开的子节点选择局部位置。
+   *
+   * 规则：
+   * - 从父节点右侧开始，按网格向右 / 向下铺开；
+   * - 只和**同一层**已有节点做避让，不移动任何老节点；
+   * - 纵向空间按到下一层的距离计算，空间不够优先增加列数，保持层高。
+   */
+  _placeExpandedChildren({ parentId, parentData, children, scale }) {
+    const positions = new Map()
+    const parentRect = this._renderRectOf(parentId)
+    if (!parentRect) return positions
+
+    const sizes = children.map((data) => this._expandedBlockSize(data, scale))
+    const maxWidth = Math.max(1, ...sizes.map((size) => size.width))
+    const maxHeight = Math.max(1, ...sizes.map((size) => size.height))
+    const cellWidth = maxWidth + 40
+    const cellHeight = maxHeight + 22
+
+    const panelId = parentData.__groupPanelId || null
+    const occupied = []
+    let layerRight = parentRect.right
+    for (const node of this.graph.getData().nodes || []) {
+      if (String(node.id) === parentId) continue
+      if (panelId && String(node.data?.__groupPanelId || '') !== String(panelId)) continue
+      const rect = this._renderRectOf(node.id)
+      if (!rect) continue
+      occupied.push(rect)
+      layerRight = Math.max(layerRight, rect.right)
+    }
+
+    // 从「该层最右侧」之外开始排，保证不压住已有节点，也不必把老节点往下挤
+    const maxRows = this._availableRows(parentRect, panelId, cellHeight)
+    const cols = Math.max(1, Math.min(6, Math.ceil(children.length / maxRows)))
+    const anchorX = layerRight + 26 + cellWidth / 2
+    const anchorY = parentRect.top + parentRect.height / 2
+
+    children.forEach((data, index) => {
+      const nodeId = String(data.id)
+      const size = sizes[index]
+      const col = index % cols
+      let x = anchorX + col * cellWidth
+      let y = anchorY + Math.floor(index / cols) * cellHeight
+      let rect = rectFromTopLeft(
+        nodeId,
+        x - size.width / 2,
+        y - size.height / 2,
+        size.width,
+        size.height,
+      )
+
+      // 兜底避让：估计尺寸与真实渲染有误差时，向下顺延
+      let guard = 0
+      while (occupied.some((item) => rectsOverlap(item, rect, 6)) && guard < 80) {
+        guard += 1
+        y += cellHeight * 0.6
+        rect = rectFromTopLeft(
+          nodeId,
+          x - size.width / 2,
+          y - size.height / 2,
+          size.width,
+          size.height,
+        )
+      }
+
+      occupied.push(rect)
+      positions.set(nodeId, { x, y })
+    })
+
+    return positions
+  }
+
+  /** 估算展开子节点的渲染块尺寸（节点本体 + 下方标签） */
+  _expandedBlockSize(data, scale) {
+    const raw = g6NodeSize(data)
+    const base = Array.isArray(raw) ? raw : [raw, raw]
+    const nodeWidth = (Number(base[0]) || 24) * scale
+    const nodeHeight = (Number(base[1]) || 24) * scale
+    const show = data.hideLabel !== true
+    const font = (data.kind === 'rack' ? 11 : 10.5) * scale
+    const text = String(data.name || data.id || '')
+    let units = 0
+    for (const char of text) {
+      if (/[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef]/.test(char)) units += 1
+      else if (char === ' ') units += 0.32
+      else units += 0.56
+    }
+    const labelWidth = show ? Math.min(280, units * font + 14) : 0
+    const labelHeight = show ? font * 1.25 + 2 + 7 * scale : 0
+    return {
+      width: Math.max(nodeWidth, labelWidth),
+      height: nodeHeight + labelHeight,
+    }
+  }
+
+  /** 当前层向下可用多少行，避免因为子节点太多把层高撑到下一层 */
+  _availableRows(parentRect, panelId, cellHeight) {
+    if (!panelId) return 4
+    const runtime = this._group()
+    const panel = runtime?.panelById(panelId)
+    const rect = panel ? runtime.panelRect(panel) : null
+    if (!rect) return 4
+
+    const next = (runtime.panels() || [])
+      .filter((item) => String(item.id) !== String(panelId))
+      .map((item) => runtime.panelRect(item))
+      .filter((item) => item && item.top > rect.top + 1)
+      .sort((a, b) => a.top - b.top)[0]
+
+    if (!next) return 4
+    // 层面板底部 = 成员包围盒底部 + 下内边距；预留这一块再去算能放几行
+    const padBottom = runtime._basePadding()[2]
+    const spare =
+      next.top - runtime._minLayerGap() - (parentRect.bottom + padBottom)
+    if (spare <= 0) return 1
+    return Math.max(1, Math.min(4, 1 + Math.floor(spare / cellHeight)))
+  }
+
   /** 分层归并规则：目前网络场景归并为「核心 / 汇聚 / 接入」三层 */
   _layerBuckets(payload) {
     return payload?.meta?.scene === 'network' ? NETWORK_LAYER_BUCKETS : undefined
   }
 
+  /**
+   * 把「右键展开」的子拓扑合并回原始 payload。
+   *
+   * 只在数据层做合并，不碰渲染：
+   * - 子节点已经继承父节点的 `layer / group`，会被 Group 布局自然归到同一层；
+   * - 轮询调用 `_ingest()` 时重新合并，展开状态不会因为刷新丢失；
+   * - 父节点已从 payload 消失时跳过该条展开记录，避免产生孤儿节点。
+   */
+  _expandedPayload(payload) {
+    if (!this._expanded.size || !payload?.nodes) return payload
+    const nodes = [...payload.nodes]
+    const links = [...(payload.links || [])]
+    const nodeIds = new Set(nodes.map((node) => String(node.id)))
+    const linkIds = new Set(links.map((link) => String(link.id)))
+
+    for (const [parentId, entry] of this._expanded) {
+      if (!nodeIds.has(String(parentId))) continue
+      for (const node of entry.nodes) {
+        const id = String(node.id)
+        if (nodeIds.has(id)) continue
+        nodeIds.add(id)
+        nodes.push(node)
+      }
+      for (const link of entry.links) {
+        const id = String(link.id)
+        if (linkIds.has(id)) continue
+        linkIds.add(id)
+        links.push(link)
+      }
+    }
+    return { ...payload, nodes, links }
+  }
+
   _ingest(payload) {
     this.payload = payload
-    const comboMode = this._isComboMode()
-    this.data = toG6Data(payload, {
-      combos: comboMode,
-      // 只有自研分层布局才启用 2.5D 透视缩放；其他布局即使生成 Combo 也保持 1:1
-      comboOptions: isComboLayerLayout(this.layoutId)
-        ? { ...this._layoutOptions(), layerBuckets: this._layerBuckets(payload) }
-        : { perspective: false },
-    })
+    // 展开的子图先并回数据，再按当前模式生成 G6 数据
+    const source = this._expandedPayload(payload)
+    const mode = this._dataMode()
+    if (mode === 'group') {
+      // Group 版：不生成 Combo，层编译成普通「面板节点」
+      this.data = toGroupData(source, {
+        ...this._layoutOptions(),
+        layerBuckets: this._layerBuckets(payload),
+      })
+    } else {
+      this.data = toG6Data(source, {
+        combos: mode === 'combo',
+        // 只有自研分层布局才启用 2.5D 透视缩放；其他布局即使生成 Combo 也保持 1:1
+        comboOptions: isComboLayerLayout(this.layoutId)
+          ? { ...this._layoutOptions(), layerBuckets: this._layerBuckets(payload) }
+          : { perspective: false },
+      })
+    }
     this.signature = g6DataSignature(this.data)
     this.elements = new Map(this.data.nodes.map((node) => [node.id, node.data]))
     this.edgesByNode = new Map()
@@ -675,6 +1192,8 @@ export class G6TopologyGraph {
     this._ingest(payload)
 
     if (this.signature !== previousSignature || relayout) {
+      // 全量重渲染会重新走布局，旧的展开几何快照不再可信
+      this._panelSnapshots.clear()
       await this._withoutAnimation(async () => {
         this._resetLayerSlopes()
         this._applyOptions()
@@ -730,7 +1249,7 @@ export class G6TopologyGraph {
     const sameLayout = id === this.layoutId
     if (sameLayout && !options) return
 
-    const previousComboMode = this._isComboMode()
+    const previousDataMode = this._dataMode()
     this.layoutId = id
     if (options && typeof options === 'object') this.layoutOverrides = options
     if (!this.graph) return
@@ -741,9 +1260,10 @@ export class G6TopologyGraph {
       this._resetLayerSlopes()
       this._applyOptions()
 
-      const nextComboMode = this._isComboMode()
-      if (previousComboMode !== nextComboMode && this.payload) {
-        // 进入 / 离开 Combo 模式时，数据中的 combos 需要同步生成或移除
+      const nextDataMode = this._dataMode()
+      if (previousDataMode !== nextDataMode && this.payload) {
+        // 在「普通 / Combo / Group」三种数据形态之间切换时，
+        // 需要重新生成数据（combos 或面板节点），不能只调 layout
         this._ingest(this.payload)
         this.graph.setData(this.data)
         this._stateSig.clear()
@@ -808,6 +1328,8 @@ export class G6TopologyGraph {
    */
   async relayout() {
     if (!this.graph) return
+    // 重新布局会重算面板几何，旧快照失效
+    this._panelSnapshots.clear()
     this.graph.stopLayout?.()
     await this._withoutAnimation(async () => {
       this._resetLayerSlopes()
@@ -991,9 +1513,11 @@ export class G6TopologyGraph {
    */
   _computePerspectiveOrigin(layoutOptions = this._layoutOptions()) {
     if (!this.graph) return null
-    const layers = (this.graph.getData().combos || []).filter(
-      (combo) => combo.data?.kind === 'layer',
-    )
+    const data = this.graph.getData()
+    // Combo 版取层 Combo，Group 版取面板节点；两者都用几何矩形而非渲染包围盒
+    const layers = this._isGroupMode()
+      ? (data.nodes || []).filter((node) => isGroupPanelData(node.data))
+      : (data.combos || []).filter((combo) => combo.data?.kind === 'layer')
     if (!layers.length) return null
 
     let minX = Infinity
@@ -1001,7 +1525,7 @@ export class G6TopologyGraph {
     let minY = Infinity
     let maxY = -Infinity
     for (const combo of layers) {
-      // 用 Combo 自身的位置与 keyShape 尺寸计算，而不是渲染包围盒：
+      // 用元素自身的位置与 keyShape 尺寸计算，而不是渲染包围盒：
       // 渲染包围盒包含阴影（shadowBlur / shadowOffsetY）和描边，
       // 会让灭点整体下移几像素，导致斜边延长线无法精确交汇。
       const element = this.graph.context?.element?.getElement?.(combo.id)
@@ -1055,7 +1579,11 @@ export class G6TopologyGraph {
    * 保证拖动过程中梯形始终朝同一个中心点收拢。
    */
   async _syncPerspectiveOrigin(attempt = 0) {
-    if (!this.graph || !this._isComboMode() || this.destroying) {
+    if (
+      !this.graph ||
+      this.destroying ||
+      (!this._isComboMode() && !this._isGroupMode())
+    ) {
       this._perspectiveOrigin = null
       return
     }
@@ -1265,6 +1793,11 @@ export class G6TopologyGraph {
    * 保证节点永远在边之上。
    */
   async _applyStackZOrder() {
+    // Group 分层：面板是普通节点，层级规则由运行时按同一套 z 区间计算
+    if (this._isGroupMode()) {
+      await this._group()?.applyZOrder()
+      return
+    }
     if (!this.graph || this.destroying || !this._isComboMode()) return
     const data = this.graph.getData()
     const layers = (data.combos || []).filter((combo) => combo.data?.kind === 'layer')
@@ -1634,6 +2167,16 @@ export class G6TopologyGraph {
    * ```
    */
   checkOverlaps({ gap = 0 } = {}) {
+    if (this._isGroupMode()) {
+      const report = this._group()?.checkOverlaps({ gap })
+      if (!report) return { ok: true, nodes: [], groups: [], layers: [] }
+      return {
+        ok: report.ok,
+        nodes: (report.nodes || []).map(([a, b]) => ({ a, b })),
+        groups: [],
+        layers: (report.panels || []).map(([a, b]) => ({ a, b })),
+      }
+    }
     if (!this.graph || !this._isComboMode()) {
       return { ok: true, nodes: [], groups: [], layers: [] }
     }
@@ -1928,6 +2471,10 @@ export class G6TopologyGraph {
         strokeOpacity: 0.4,
         corner: 'rounded',
       })
+      // Hull 插件只在 AFTER_RENDER / 成员元素更新时重算轮廓。
+      // 高亮上下游时，被高亮的节点自身状态没变（变的是其他节点置灰），
+      // 所以必须主动重绘一次，否则轮廓要等到鼠标移入成员节点才出现。
+      this.graph.draw({ animation: false }).catch(() => {})
     } catch (error) {
       console.warn('[g6] Hull 更新失败', error)
     }
@@ -2029,6 +2576,8 @@ export class G6TopologyGraph {
     graph.on('node:click', (event) => {
       const id = event.target?.id ? String(event.target.id) : null
       if (!id) return
+      // 分组面板只是层的背景，不参与节点选中
+      if (isGroupPanelData(this.elements.get(id))) return
       this.select(id)
       this._emitCustom(TOPOLOGY_EVENTS.NODE_CLICK, {
         id,
@@ -2039,6 +2588,7 @@ export class G6TopologyGraph {
     graph.on('node:dblclick', (event) => {
       const id = event.target?.id ? String(event.target.id) : null
       if (!id) return
+      if (isGroupPanelData(this.elements.get(id))) return
       graph.focusElement(id)
       this._emitCustom(TOPOLOGY_EVENTS.NODE_DBLCLICK, {
         id,
@@ -2062,7 +2612,11 @@ export class G6TopologyGraph {
     for (const type of ['node', 'combo']) {
       graph.on(`${type}:dragstart`, (event) => this._beginDrag(event))
       // 拖动节点时按帧扩展所属层，让面板始终包住节点
-      graph.on(`${type}:drag`, () => this._queueComboGrow())
+      graph.on(`${type}:drag`, () => {
+        this._queueComboGrow()
+        // Group 版：拖面板时带动层内节点；拖节点时扩展面板
+        this._group()?.drag()
+      })
       graph.on(`${type}:dragend`, (event) => this._endDrag(event))
     }
   }
@@ -2072,6 +2626,8 @@ export class G6TopologyGraph {
   _beginDrag(event) {
     if (this._dragging) return
     this._dragging = true
+    // Group 分层：记录拖拽会话（面板 -> 成员联动 / 节点 -> 面板扩展）
+    this._group()?.beginDrag(event)
     // 拖动会改变层高 / 层位置，先记住拖动前的标准层距，松手后按它恢复均匀间距
     this._layerGapSnapshot = this._captureLayerGaps()
     // 正常挂载后斜率已冻结；这里兜底处理「首次布局尚未稳定就开始拖动」的情况
@@ -2080,7 +2636,7 @@ export class G6TopologyGraph {
     }
     // 拖动期间层宽高实时变化，关掉过渡动画可让面板立即跟随，
     // 同时避免松手时还在跑的 draw 动画把修正延后。
-    if (this._isComboMode()) {
+    if (this._isComboMode() || this._isGroupMode()) {
       this._dragAnimationHold = true
       this._setAnimationSuppressed(true)
     }
@@ -2407,6 +2963,10 @@ export class G6TopologyGraph {
 
     // 层会随子节点变大，松手后统一修正 Combo 之间的重叠
     this._scheduleDragOverlapResolve()
+
+    // Group 分层：拟合面板尺寸、推开重叠面板、恢复层级
+    this._group()?.endDrag()
+    if (this._isGroupMode()) this._releaseDragAnimation()
 
     // drag-element 在 dragstart 时调用了 frontElement()，会把被拖元素永久提到最前，
     // 松手后立刻恢复「层 → 边 → 节点」的分层层级，避免连线骑到面板上。

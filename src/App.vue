@@ -73,7 +73,7 @@
           </button>
 
           <button
-            v-if="renderer === 'g6' && g6LayoutActive === 'g6-combo-layer'"
+            v-if="renderer === 'g6' && isLayeredLayout"
             type="button"
             class="rail-btn rail-action"
             :title="t('topbar.relayout')"
@@ -84,7 +84,7 @@
           </button>
 
           <button
-            v-if="renderer === 'g6' && g6LayoutActive === 'g6-combo-layer'"
+            v-if="renderer === 'g6' && isLayeredLayout"
             type="button"
             class="rail-btn rail-action rail-depth"
             :class="{ active: depth25d }"
@@ -97,7 +97,7 @@
           </button>
 
           <label
-            v-if="renderer === 'g6' && g6LayoutActive === 'g6-combo-layer' && depth25d && !workspace.collapsed"
+            v-if="renderer === 'g6' && isLayeredLayout && depth25d && !workspace.collapsed"
             class="rail-field"
             :title="t('rail.trapezoidAngleHint')"
           >
@@ -436,6 +436,12 @@ const layout = computed(() => (renderer.value === 'g6' ? g6Layout.value : threeL
 const sceneMeta = computed(() => getSceneMeta(scene.value))
 const isDataCenter = computed(() => Array.isArray(displayPayload.value?.racks))
 const g6LayoutActive = computed(() => (isDataCenter.value ? 'g6-grid' : g6Layout.value))
+// 两种 2.5D 分层实现（Combo / Group）共用层距、透视、梯形角度与重新布局能力
+const isLayeredLayout = computed(
+  () =>
+    g6LayoutActive.value === 'g6-combo-layer' ||
+    g6LayoutActive.value === 'g6-group-layer',
+)
 const hasData = computed(() => {
   const current = displayPayload.value
   if (!current) return false

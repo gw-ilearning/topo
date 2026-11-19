@@ -44,7 +44,7 @@ function normalizeSize(size) {
   return Number.isFinite(value) ? [value, value] : [32, 32]
 }
 
-function parsePadding(padding) {
+export function parsePadding(padding) {
   if (Array.isArray(padding)) {
     const [top = 0, right = top, bottom = top, left = right] = padding.map(
       (item) => Number(item) || 0,
@@ -55,7 +55,7 @@ function parsePadding(padding) {
   return { top: value, right: value, bottom: value, left: value }
 }
 
-function orderOf(combo, fallback = 0) {
+export function orderOf(combo, fallback = 0) {
   const candidates = [combo?.data?.order, combo?.data?.layer, fallback]
   for (const candidate of candidates) {
     const value = Number(candidate)
@@ -68,7 +68,7 @@ function orderOf(combo, fallback = 0) {
  * 层内聚类键：仅用于把语义相关的节点排在一起，不会生成分组面板。
  * 与数据层的分组规则保持一致：机柜按行，普通节点按 group，再回退到 type。
  */
-function clusterKeyOf(node) {
+export function clusterKeyOf(node) {
   const data = node.data || {}
   if (data.kind === 'rack') return String(data.row || '机柜')
   return String(data.group || data.type || '__cluster__')

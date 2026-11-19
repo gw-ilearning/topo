@@ -15,6 +15,10 @@ import {
   COMBO_LAYER_LAYOUT_ID,
   COMBO_LAYER_PRESET_OPTIONS,
 } from './comboConfig.js'
+import {
+  GROUP_LAYER_LAYOUT_ID,
+  GROUP_LAYER_PRESET_OPTIONS,
+} from './groupConfig.js'
 
 /** 单个布局定义的基类 */
 export class G6LayoutDefinition {
@@ -226,8 +230,23 @@ export class G6ComboLayerLayoutDefinition extends G6LayoutDefinition {
   }
 }
 
-/* ------------------------------ 注册中心 ------------------------------ */
+export class G6GroupLayerLayoutDefinition extends G6LayoutDefinition {
+  constructor() {
+    super({
+      id: GROUP_LAYER_LAYOUT_ID,
+      type: GROUP_LAYER_LAYOUT_ID,
+      name: '分层 Group',
+      icon: 'layers',
+      order: 85,
+      description: '2.5D 分层（Group 版）：层是普通梯形分组面板，节点按分组归属联动拖拽',
+      options: { ...GROUP_LAYER_PRESET_OPTIONS },
+      // 不使用 Combo；面板由普通节点 + 运行时维护
+      combo: false,
+    })
+  }
+}
 
+/* ------------------------------ 注册中心 ------------------------------ */
 export class G6LayoutRegistry {
   constructor(definitions = []) {
     this._definitions = new Map()
@@ -285,6 +304,7 @@ export const g6LayoutRegistry = new G6LayoutRegistry([
   new G6GridLayout(),
   new G6RadialLayout(),
   new G6ComboLayerLayoutDefinition(),
+  new G6GroupLayerLayoutDefinition(),
 ])
 
 /** 兼容旧 API：布局实例数组 */
